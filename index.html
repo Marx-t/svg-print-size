@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SVG 打印尺寸计算器 · 多大才打得清</title>
+<meta name="description" content="上传 SVG，按喷嘴实际线宽算出需要打多大尺寸才清晰。纯浏览器本地计算，文件不上传。">
+<link rel="stylesheet" href="styles.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%232563eb'/><path d='M8 21l4-4 3 3 5-6 4 5' stroke='white' stroke-width='2.2' fill='none' stroke-linecap='round' stroke-linejoin='round'/></svg>">
+</head>
+<body>
+<header class="top">
+  <div class="wrap top-inner">
+    <div class="brand">
+      <span class="mark" aria-hidden="true">
+        <svg viewBox="0 0 32 32"><rect width="32" height="32" rx="8" fill="currentColor"/><path d="M8 21l4-4 3 3 5-6 4 5" stroke="#fff" stroke-width="2.2" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </span>
+      <div>
+        <h1>SVG 打印尺寸计算器</h1>
+        <p class="sub">这张图要打多大，细节才不会被喷嘴吃掉</p>
+      </div>
+    </div>
+    <a class="gh" href="https://github.com/Marx-t/svg-print-size" target="_blank" rel="noopener">GitHub</a>
+  </div>
+</header>
+
+<main class="wrap layout">
+  <section class="panel inputs">
+    <div id="drop" class="drop" tabindex="0" role="button" aria-label="选择或拖入 SVG 文件">
+      <svg class="drop-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 16V4m0 0L8 8m4-4l4 4M4 15v3a2 2 0 002 2h12a2 2 0 002-2v-3" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      <strong id="dropTitle">拖入 SVG 文件</strong>
+      <span class="hint">或点击选择 · 也可以在下方选择示例</span>
+      <input type="file" id="file" accept=".svg,image/svg+xml" hidden>
+    </div>
+
+    <div class="samples">
+      <span class="lbl">示例</span>
+      <button class="chip sample" data-sample="poster">海报（细线）</button>
+      <button class="chip sample" data-sample="logo">Logo（粗块）</button>
+      <button class="chip sample" data-sample="lineart">线稿</button>
+    </div>
+
+    <div class="fields">
+      <label class="field">
+        <span>喷嘴 / 线宽 <em id="lwTag">0.42 mm</em></span>
+        <select id="nozzle">
+          <option value="0.42" selected>0.4 喷嘴 · 0.42 mm 线宽（Bambu 默认）</option>
+          <option value="0.40">0.4 喷嘴 · 0.40 mm 线宽</option>
+          <option value="0.22">0.2 喷嘴 · 0.22 mm 线宽</option>
+          <option value="0.20">0.2 喷嘴 · 0.20 mm 线宽</option>
+          <option value="0.62">0.6 喷嘴 · 0.62 mm 线宽</option>
+          <option value="custom">自定义…</option>
+        </select>
+      </label>
+      <label class="field custom-lw" id="customLwWrap" hidden>
+        <span>自定义线宽（mm）</span>
+        <input type="number" id="customLw" value="0.42" min="0.05" max="5" step="0.01">
+      </label>
+
+      <label class="field">
+        <span>测量口径 <em id="pctTag">第 15 百分位</em></span>
+        <input type="range" id="pct" min="1" max="40" step="1" value="15">
+        <small>默认 15：忽略尖角收敛出来的极细尖端。调到 5 更保守，会把尖角也算进要求里</small>
+      </label>
+
+      <label class="field">
+        <span>热床安全尺寸（mm）</span>
+        <input type="number" id="bed" value="250" min="50" max="2000" step="10">
+        <small>用于估算要不要分块、切几片</small>
+      </label>
+    </div>
+
+    <div class="meta" id="meta" hidden></div>
+  </section>
+
+  <section class="panel results" id="results">
+    <div class="empty" id="empty">
+      <p>上传 SVG，或点上面的示例。</p>
+      <p class="muted">全部计算在浏览器本地完成，文件不会上传到任何服务器。</p>
+    </div>
+
+    <div id="out" hidden>
+      <div id="warn" class="warn" hidden></div>
+
+      <div class="stats" id="stats"></div>
+
+      <div class="card">
+        <div class="card-head">
+          <h2>这个尺寸够不够</h2>
+          <button class="chip ghost" id="copy">复制结论</button>
+        </div>
+        <div class="tablewrap">
+          <table id="table">
+            <thead>
+              <tr><th>成品长边</th><th>短边</th><th>最细处</th><th>≈ 线宽倍数</th><th>判定</th></tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>反推：多大才合适</h2>
+        <div class="tiers" id="tiers"></div>
+        <div class="tile" id="tile"></div>
+      </div>
+
+      <div class="card">
+        <h2>反过来问：我要打这个尺寸</h2>
+        <div class="ask">
+          <label>长边 <input type="number" id="askW" min="10" step="5"> mm</label>
+          <span class="ask-out" id="askOut"></span>
+        </div>
+      </div>
+
+      <details class="card">
+        <summary><h2>最细结构分布（逐色块）</h2></summary>
+        <div class="tablewrap">
+          <table id="colors">
+            <thead><tr><th>颜色</th><th>面积占比</th><th>最细</th><th>中位</th><th>最粗</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <p class="muted small">单位是 SVG 用户单位；数值越大代表这块色块越粗。</p>
+      </details>
+    </div>
+  </section>
+</main>
+
+<footer class="wrap foot">
+  <p>
+    判据：等效像素 ≈ 该边尺寸 ÷ 实际线宽，即等效 PPI ≈ 25.4 ÷ 线宽 —— 见
+    <a href="https://wiki.luminastudio.com.cn/zh/docs/knowledge/nozzle-equivalent-resolution/" target="_blank" rel="noopener">Lumina Studio Wiki</a>。
+    最终以切片预览与试打为准。
+  </p>
+</footer>
+
+<script src="app.js" type="module"></script>
+</body>
+</html>
