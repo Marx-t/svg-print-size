@@ -164,7 +164,35 @@ function snapToPalette(idx, w, h, maxColors = 48, minFrac = 0.0003) {
   cand.sort((a, b) => counts[b] - counts[a]);
 
   const total = w * h;
-  const palette = cand.filter((q) => counts[q] / total >= minFrac).slice(0, maxColors);
+  const binRgb = (q) => [
+    ((q >> 10) & 31) * 8 + 4,
+    ((q >> 5) & 31) * 8 + 4,
+    (q & 31) * 8 + 4,
+  ];
+
+  /**
+   * 调色板必须去重。15 位量化会把同一块实色（渐变、抗锯齿、轻微色差）
+   * 摊成十几个相邻色箱，每个色箱都够 0.03% 面积、都能进前 48 名。
+   * 它们一旦各自成为独立区域，就互相咬合成 1–2 px 的碎带，
+   * 量出来的"最细结构"恒等于栅格离散下限 2 px —— 于是任何图片
+   * 都会得出同一个结论。所以先进后出按 RGB 距离合并近似色。
+   */
+  const MERGE_D2 = 26 * 26;
+  const palette = [];
+  const prgb = [];
+  for (const q of cand) {
+    if (counts[q] / total < minFrac) break; // cand 已按像素数降序
+    if (palette.length >= maxColors) break;
+    const c = binRgb(q);
+    let dup = false;
+    for (let p = 0; p < prgb.length; p++) {
+      const dr = c[0] - prgb[p][0];
+      const dg = c[1] - prgb[p][1];
+      const db = c[2] - prgb[p][2];
+      if (dr * dr + dg * dg + db * db < MERGE_D2) { dup = true; break; }
+    }
+    if (!dup) { palette.push(q); prgb.push(c); }
+  }
   if (!palette.length) palette.push(cand[0]);
 
   // 调色板的真实 RGB（取量化中心）
@@ -281,7 +309,7 @@ const pct = (arr, p) => {
  * 逐色块测量"墨宽"分布：区域内距离变换的脊点（局部极大）≈ 中轴线，
  * 2×距离 就是该点的色块宽度。取分位数得到 最细 / 中位 / 最粗。
  */
-function measureRegions(labels, stats, w, h, pxPerUnit, pctValue = 15, minAreaFrac = 0.0004) {
+function measureRegions(labels, stats, w, h, pxPerUnit, pctValue = 15, minAreaFrac = 0.0004, skipLargest = true) {
   const out = [];
   let budget = 60e6; // 距离变换的像素预算，防止极端图卡死
   const hexToRgb = (hex) => [
@@ -313,9 +341,35 @@ function measureRegions(labels, stats, w, h, pxPerUnit, pctValue = 15, minAreaFr
     return false;
   };
 
+  /**
+   * 「最细结构」不能直接取脊点宽度的低分位数：任何带尖角的形状，
+   * 其中轴线都会向尖角分叉，分叉上的宽度一路趋近 0。这些点数量可观，
+   * 却根本不是要印出来的笔画（FDM 会把尖角自然磨圆，没人看得出差别）。
+   * 低分位数还会被抗锯齿留下的 1px 碎片的宽度下限钉死，
+   * 于是测出来的永远是栅格分辨率，而不是图本身。
+   *
+   * 做法：升序扫描脊点宽度，取「宽度带内点数达到总点数 massFrac」的最小宽度。
+   * 也就是说，只统计真正占了一定量"笔画长度"的宽度 —— 尖角分叉和
+   * 零星碎片因为带宽内点数太少，被排除。
+   */
+  const significantThin = (ws, idxs, massFrac) => {
+    const n = ws.length;
+    const need = Math.max(6, Math.ceil(massFrac * n));
+    let j0 = 0;
+    let j1 = 0;
+    for (let i = 0; i < n; i++) {
+      const wv = ws[i];
+      if (!(wv > 0)) continue;
+      while (j0 < n && ws[j0] < wv * 0.85) j0++;
+      while (j1 < n && ws[j1] <= wv * 1.18) j1++;
+      if (j1 - j0 >= need) return { w: wv, at: idxs[i] };
+    }
+    return { w: ws[n - 1], at: idxs[n - 1] };
+  };
+
   for (let li = 0; li < stats.length && out.length < 24; li++) {
     const rec = stats[li];
-    if (li === 0) continue;                       // 最大面积色视为底/背景
+    if (li === 0 && skipLargest) continue;         // 最大面积色视为底/背景
     const frac = rec.areaFrac;
     if (frac < minAreaFrac) continue;
 
@@ -342,8 +396,69 @@ function measureRegions(labels, stats, w, h, pxPerUnit, pctValue = 15, minAreaFr
     }
     if (!any) continue;
 
+    /*
+     * 只保留成片的像素。抗锯齿和渐变的过渡色经常以 1–2px 的碎点形式撒满画面，
+     * 每块碎点的"宽度"恒等于栅格离散下限，会把最细结构永远钉在同一个数上。
+     * 真实笔画则总是连成长条。这里按 4 邻接找连通块，面积不足最大块 2% 的丢掉。
+     */
+    if (area <= 8e6) {
+      const comp = new Int32Array(mw * mh).fill(-1);
+      const stack = new Int32Array(mw * mh);
+      const compArea = [];
+      const compCore = [];
+      for (let y = 1; y < mh - 1; y++) {
+        for (let x = 1; x < mw - 1; x++) {
+          const s0 = y * mw + x;
+          if (!mask[s0] || comp[s0] >= 0) continue;
+          const id = compArea.length;
+          let sp = 0;
+          stack[sp++] = s0;
+          comp[s0] = id;
+          let n = 0;
+          while (sp) {
+            const pp = stack[--sp];
+            n++;
+            const px = pp % mw;
+            const py = (pp - px) / mw;
+            let q;
+            if (px > 0) { q = pp - 1; if (mask[q] && comp[q] < 0) { comp[q] = id; stack[sp++] = q; } }
+            if (px < mw - 1) { q = pp + 1; if (mask[q] && comp[q] < 0) { comp[q] = id; stack[sp++] = q; } }
+            if (py > 0) { q = pp - mw; if (mask[q] && comp[q] < 0) { comp[q] = id; stack[sp++] = q; } }
+            if (py < mh - 1) { q = pp + mw; if (mask[q] && comp[q] < 0) { comp[q] = id; stack[sp++] = q; } }
+          }
+          compArea.push(n);
+          compCore.push(0);
+        }
+      }
+      // 标记每个连通块里是否存在「实心内核」像素（上下左右四个邻居同块）
+      for (let y = 1; y < mh - 1; y++) {
+        for (let x = 1; x < mw - 1; x++) {
+          const i = y * mw + x;
+          if (!mask[i]) continue;
+          const c = comp[i];
+          if (compCore[c]) continue;
+          if (comp[i - 1] === c && comp[i + 1] === c && comp[i - mw] === c && comp[i + mw] === c) compCore[c] = 1;
+        }
+      }
+      let maxA = 0;
+      for (const a of compArea) if (a > maxA) maxA = a;
+      const keep = Math.max(6, maxA * 0.02);
+      const total = w * h;
+      let kept = 0;
+      for (let i = 0; i < mask.length; i++) {
+        if (!mask[i]) continue;
+        const c = comp[i];
+        const ok = compArea[c] >= keep && (compCore[c] || compArea[c] >= total * 0.0005);
+        if (!ok) mask[i] = 0;
+        else kept++;
+      }
+      if (kept < 6) continue; // 整块都是碎点 → 不是要印的结构
+    }
+
     const dist = edt(mask, mw, mh);
     const widths = [];
+    const ridgeX = [];
+    const ridgeY = [];
     for (let y = 1; y < mh - 1; y++) {
       for (let x = 1; x < mw - 1; x++) {
         const c = dist[y * mw + x];
@@ -359,14 +474,22 @@ function measureRegions(labels, stats, w, h, pxPerUnit, pctValue = 15, minAreaFr
             }
           }
         }
-        if (isMax) widths.push((2 * c) / pxPerUnit);
+        if (isMax) {
+          widths.push((2 * c) / pxPerUnit);
+          ridgeX.push(rec.x0 + x - 1);
+          ridgeY.push(rec.y0 + y - 1);
+        }
       }
     }
     if (widths.length < 6) continue;
 
     // 细而小的色块要额外判断：它可能是抗锯齿过渡带，而不是画面内容
     const medianPx = pct(widths, 50) * pxPerUnit;
-    if (frac < 0.03 && medianPx <= 3.5) {
+    let suspect = false;
+    // 只要这条色带本身很薄（<3.5px），且颜色确实落在两个邻色的连线上，
+    // 就当作抗锯齿/渐变过渡带剔掉——不管它占多大面积。渐变大色块
+    // 在很多设计稿里就是这样被切成几十条 1–2px 的假"细线"的。
+    if (medianPx <= 3.5) {
       const neighbors = new Set();
       const yA = Math.max(0, rec.y0 - 2), yB = Math.min(h - 1, rec.y1 + 2);
       const xA = Math.max(0, rec.x0 - 2), xB = Math.min(w - 1, rec.x1 + 2);
@@ -377,15 +500,53 @@ function measureRegions(labels, stats, w, h, pxPerUnit, pctValue = 15, minAreaFr
           if (l !== rec.index) neighbors.add(l);
         }
       }
-      if (isAntialiasBand(rec, neighbors)) continue;
+      if (isAntialiasBand(rec, neighbors)) suspect = true;
+    }
+
+    // 显著最细宽度 + 它落在哪个脊点上（精测要以该点为圆心放大）
+    const step = widths.length > 40000 ? Math.ceil(widths.length / 40000) : 1;
+    const order = [];
+    for (let i = 0; i < widths.length; i += step) order.push(i);
+    order.sort((a, b) => widths[a] - widths[b]);
+    const sortedW = order.map((i) => widths[i]);
+    const massFrac = Math.max(0.004, Math.min(0.2, pctValue / 500));
+    const pickSig = significantThin(sortedW, order, massFrac);
+
+    // 同一色块里常并存几种线宽（细线 + 粗块），只挑一个点会漏掉更细的，
+    // 所以给出最多 3 个空间上分散的「最细候选点」，交给精测逐个确认。
+    const thinCands = [];
+    {
+      const cap = pickSig.w * 2.4;
+      const minDist = Math.max(8, w * 0.06);
+      let lx = -1e9;
+      let ly = -1e9;
+      const add = (i) => {
+        const x = ridgeX[i];
+        const y = ridgeY[i];
+        if (thinCands.length && Math.hypot(x - lx, y - ly) < minDist) return;
+        thinCands.push({ w: widths[i], at: [x, y] });
+        lx = x;
+        ly = y;
+      };
+      add(pickSig.at);
+      for (let k = 0; k < order.length && thinCands.length < 2; k++) {
+        const i = order[k];
+        if (widths[i] > cap) break;
+        add(i);
+      }
     }
 
     out.push({
       color: rec.color,
+      index: rec.index,
+      suspect,
       areaFrac: frac,
-      thin: pct(widths, pctValue),
+      thin: pickSig.w,
+      thinCoarse: pickSig.w,
       median: medianPx / pxPerUnit,
       thick: pct(widths, 95),
+      thinAt: [ridgeX[pickSig.at], ridgeY[pickSig.at]],
+      thinCands,
       bbox: [rec.x0, rec.y0, rec.x1, rec.y1],
     });
   }
@@ -402,11 +563,12 @@ async function analyse(text, { pctValue = 15 } = {}) {
   const meta = parseMeta(text);
   const artW = meta.artW;
   const ar = meta.artH / artW;
+  const longU = Math.max(meta.artW, meta.artH);
 
-  let longPx = 1400;
+  let longPx = 1600;
   let best = null;
 
-  for (let attempt = 0; attempt < 3; attempt++) {
+  for (let attempt = 0; attempt < 2; attempt++) {
     const pxW = Math.max(64, Math.round(ar <= 1 ? longPx : longPx / ar));
     const pxH = Math.max(64, Math.round(pxW * ar));
     const data = await rasterize(text, meta, pxW, pxH);
@@ -417,70 +579,173 @@ async function analyse(text, { pctValue = 15 } = {}) {
     const thin = regions.length ? Math.min(...regions.map((r) => r.thin)) : NaN;
     best = { pxW, pxH, pxPerUnit, regions, thin };
 
-    // 最细结构不足 ~4px 时离散误差会明显吃掉精度，提高栅格密度重测
-    if (!Number.isFinite(thin) || thin * pxPerUnit >= 4 || longPx >= 2000) break;
-    longPx = Math.min(2000, Math.round(longPx * 1.6));
+    // 最细结构不足 ~3px 时，量到的全是栅格离散误差，加一次密度重测
+    if (!Number.isFinite(thin) || thin * pxPerUnit >= 3 || longPx >= 2200) break;
+    longPx = 2200;
   }
 
-  const { pxW, pxH, pxPerUnit, regions, thin } = best;
+  const { pxW, pxH, pxPerUnit } = best;
+  let regions = best.regions;
 
-  /**
-   * 精测：把最细的几个色块各自单独放大重算。
-   * 整图受像素预算限制，细线往往只有 2–3px；距离变换的 ±1px 离散误差
-   * 加上抗锯齿让边缘各丢半像素，会让细线宽度少 30% 以上。
+/**
+   * 精测：围绕候选的最细点开小窗口放大，直到数值收敛。
+   *  - 窗口只取候选点周围 12 倍宽度，放大倍率因此可以远超整图栅格；
+   *  - 放大后若仍只有 ~2px 宽，说明那不是能被印出来的实色结构
+   *    （渐变过渡带 / 抗锯齿残留 / 采样噪点），判掉；
+   *  - 收敛判据：相邻两轮相对变化 < 20%；
+   *  - 返回 null 表示这次没能放大（受画布上限限制），数值不可信。
    */
-  const refineOne = async (target) => {
-    const vb = meta.viewBox;
-    const toUser = (px) => px / pxPerUnit;
-    const bwU = toUser(target.bbox[2] - target.bbox[0] + 1);
-    const bhU = toUser(target.bbox[3] - target.bbox[1] + 1);
-    const mx = Math.max(2, bwU * 0.04);
-    const my = Math.max(2, bhU * 0.04);
+  const rgbOf = (h) => [
+    parseInt(h.slice(1, 3), 16),
+    parseInt(h.slice(3, 5), 16),
+    parseInt(h.slice(5, 7), 16),
+  ];
 
-    // 细长结构只截中间一段（细线沿长度方向宽度基本一致），避免画布过大
-    let wx = bwU;
-    let wy = bhU;
-    if (bwU > bhU * 3) wx = bwU * 0.3;
-    else if (bhU > bwU * 3) wy = bhU * 0.3;
-
-    const x0 = vb[0] + toUser(target.bbox[0]) + (bwU - wx) / 2 - mx;
-    const y0 = vb[1] + toUser(target.bbox[1]) + (bhU - wy) / 2 - my;
-    const cw = wx + 2 * mx;
-    const ch = wy + 2 * my;
-    if (cw <= 0 || ch <= 0) return;
-
-    // 目标：把细结构放大到约 60px，抗锯齿造成的固定损失占比就很小了
-    let s = Math.min(80, Math.max(pxPerUnit * 1.8, 60 / Math.max(target.thin, 1e-6)));
-    s = Math.min(s, 8000 / Math.max(cw, ch), Math.sqrt(2.4e6 / (cw * ch)));
-    if (!(s > pxPerUnit * 1.15)) return;
-
-    const cpxW = Math.max(48, Math.round(cw * s));
-    const cpxH = Math.max(48, Math.round(ch * s));
-    try {
-      const cdata = await rasterize(text, meta, cpxW, cpxH, [x0, y0, cw, ch]);
-      const cidx = quantize(cdata);
-      const csnap = snapToPalette(cidx, cpxW, cpxH);
-      const cregions = measureRegions(csnap.labels, csnap.stats, cpxW, cpxH, cpxW / cw, pctValue);
-      if (!cregions.length) return;
-      // 裁剪窗口就是围着目标结构取的，取面积最大的一块；
-      // 不能取最小值——否则会把窗口里的抗锯齿过渡带当成结果。
-      const main = cregions.reduce((a, b) => (a.areaFrac >= b.areaFrac ? a : b));
-      // 一致性校验：精测结果不应该明显小于粗测，否则说明量偏了
-      if (!Number.isFinite(main.thin) || main.thin <= target.thin * 0.6) return;
-      const k = main.thin / target.thin;
-      target.thin = main.thin;
-      target.median *= k;
-      target.thick *= k;
-    } catch {
-      /* 精测失败就用粗测结果，不影响主流程 */
+  const pickNearest = (cands, hex) => {
+    const t = rgbOf(hex);
+    let bestR = null;
+    let bestD = Infinity;
+    for (const c of cands) {
+      const q = rgbOf(c.color);
+      const d = (q[0] - t[0]) ** 2 + (q[1] - t[1]) ** 2 + (q[2] - t[2]) ** 2;
+      if (d < bestD - 1e-9) { bestD = d; bestR = c; }
+      else if (Math.abs(d - bestD) < 1e-9 && c.areaFrac > bestR.areaFrac) bestR = c;
     }
+    if (bestR && bestD < 576) return bestR;
+    return null; // 颜色对不上就不猜，避免量到抗锯齿过渡色
   };
 
-  const byThin = [...regions].sort((a, b) => a.thin - b.thin).slice(0, 3);
-  for (const t of byThin) await refineOne(t);
+  // 精测的总光栅化次数上限：大文件上每次都很贵，按文件体积收紧
+  let refineBudget = text.length > 2e6 ? 6 : 16;
+  const refineAt = async (colorHex, atPx, guess) => {
+    if (refineBudget <= 0) return null;
+    let cur = guess;
+    let scale = pxPerUnit;
+    let atU = [
+      meta.viewBox[0] + (atPx[0] + 0.5) / pxPerUnit,
+      meta.viewBox[1] + (atPx[1] + 0.5) / pxPerUnit,
+    ];
+    let ran = 0;
+    for (let it = 0; it < 4; it++) {
+      const winU = Math.max(cur * 12, longU * 0.0012);
+      let s = Math.min(60 / Math.max(cur, 1e-9), 3000);
+      s = Math.min(s, Math.sqrt(1.2e6) / winU);
+      if (!(s > scale * 1.05)) break;
+      const vb = [atU[0] - winU / 2, atU[1] - winU / 2, winU, winU];
+      const cpx = Math.max(48, Math.round(winU * s));
+      const sActual = cpx / winU;
+      if (refineBudget <= 0) break;
+      refineBudget--;
+      try {
+        const cdata = await rasterize(text, meta, cpx, cpx, vb);
+        const csnap = snapToPalette(quantize(cdata), cpx, cpx);
+        const cregions = measureRegions(csnap.labels, csnap.stats, cpx, cpx, sActual, pctValue, 0.0004, false);
+        if (!cregions.length) break;
+        // 优先按「窗口中心是什么颜色」来认结构：细结构在粗栅格里常被抗锯齿
+        // 混成中间色，颜色对不上，但它就在窗口正中心。
+        const c0 = cpx >> 1;
+        const centerLabel = csnap.labels[c0 * cpx + c0];
+        const centerReg = cregions.find((r) => r.index === centerLabel);
+        const bgColor = cregions.reduce((a, b) => (a.areaFrac >= b.areaFrac ? a : b)).color;
+        let main = null;
+        if (centerReg) {
+          const a = rgbOf(centerReg.color);
+          const b = rgbOf(bgColor);
+          const d2 = (a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2 + (a[2] - b[2]) ** 2;
+          if (d2 > 3600) main = centerReg; // 和背景分得开，认它
+        }
+        if (!main) main = pickNearest(cregions, colorHex);
+        if (!main) return null;
+        // 窗口正对着这个结构：中心附近必须确实是它，否则说明量偏了
+        let hit = 0;
+        let tot = 0;
+        for (let dy = -3; dy <= 3; dy++) {
+          for (let dx = -3; dx <= 3; dx++) {
+            const xx = c0 + dx;
+            const yy = c0 + dy;
+            if (xx < 0 || yy < 0 || xx >= cpx || yy >= cpx) continue;
+            tot++;
+            if (csnap.labels[yy * cpx + xx] === main.index) hit++;
+          }
+        }
+        if (!tot || hit / tot < 0.25) return null;
+        // 放大到这么细还是 1–2px，本身没有宽度可言
+        if (main.thin * sActual < 2.6) return null;
+        ran++;
+        const rel = Math.abs(main.thin - cur) / Math.max(cur, 1e-9);
+        cur = main.thin;
+        scale = sActual;
+        atU = [
+          vb[0] + (main.thinAt[0] + 0.5) / sActual,
+          vb[1] + (main.thinAt[1] + 0.5) / sActual,
+        ];
+        if (rel < 0.2) return { w: cur };
+      } catch {
+        break;
+      }
+    }
+    return ran ? { w: cur } : null;
+  };
 
-  const refined = regions.length ? Math.min(...regions.map((r) => r.thin)) : thin;
+  if (regions.length) {
+    // 收集全图的候选最细点，只精测最细的一批（够判定即可，避免大图卡顿）
+    const cands = [];
+    for (const r of regions) {
+      for (const c of r.thinCands || []) cands.push({ r, w: c.w, at: c.at, color: r.color });
+    }
+    // 实色结构优先；可疑的过渡带排在后面，最多 3 个，靠精测决定去留
+    cands.sort((a, b) => (a.r.suspect === b.r.suspect ? a.w - b.w : a.r.suspect ? 1 : -1));
+    const todo = [];
+    let suspectUsed = 0;
+    for (const c of cands) {
+      if (todo.length >= 10) break;
+      if (c.r.suspect) {
+        if (suspectUsed >= 3) continue;
+        suspectUsed++;
+      }
+      todo.push(c);
+    }
+    for (const c of todo) {
+      let v = await refineAt(c.color, c.at, c.w);
+      if (v) {
+        // 只约束下界：粗测因为抗锯齿/量化最多偏胖 ~1.5px，所以真实宽度
+        // 不可能比 (粗测 − 1.5px) 还细。比这更细的，是在窗口里认错了结构。
+        // 上界不设——粗测偏瘦（边缘被并走、细的地方被离散成 2px）正是精测
+        // 存在的理由，压住上界就把真正的修正一起压掉了。
+        const lo = Math.max(0.5, c.w * pxPerUnit - 1.5);
+        if (!(v.w * pxPerUnit >= lo)) v = null;
+      }
+      if (v && Number.isFinite(v.w) && v.w > 0) {
+        c.r.vals = c.r.vals || [];
+        c.r.vals.push(v.w);
+      }
+    }
+    for (const r of regions) {
+      const base = r.thinCoarse;
+      if (r.vals && r.vals.length) {
+        r.thin = Math.min(...r.vals);
+        r.refined = true;
+      } else if (r.suspect || base * pxPerUnit < 3.5) {
+        // 粗测就只有 1–2px，精测又没能确认它 —— 那是抗锯齿/渐变的碎边，
+        // 不是要印的结构。留着它会把结论永远钉在栅格离散下限上。
+        r.drop = true;
+      } else {
+        r.thin = base; // 本身就够粗，粗测值不受离散误差影响
+      }
+      const k = Number.isFinite(r.thin) && base > 0 ? r.thin / base : 1;
+      r.median *= k;
+      r.thick *= k;
+    }
+    const kept = regions.filter((r) => !r.drop && Number.isFinite(r.thin) && r.thin > 0);
+    if (kept.length) regions = kept;
+  }
 
+  const refined = regions.length ? Math.min(...regions.map((r) => r.thin)) : NaN;
+  const winner = regions.length
+    ? regions.reduce((a, b) => (a.thin <= b.thin ? a : b))
+    : null;
+  // 被剔掉的碎边若成了唯一候选，说明整张图没有更清晰的结构可量
+  const gridLimited = !!(winner && (winner.gridLimited || winner.drop));
   // 典型线条：按面积加权的中位数
   let med = NaN;
   if (regions.length) {
@@ -499,14 +764,15 @@ async function analyse(text, { pctValue = 15 } = {}) {
     finest: refined,
     ok: Number.isFinite(refined) && refined > 0,
     typical: med,
-    fracFinest: refined / artW,
+    fracFinest: refined / longU,
+    longU,
+    gridLimited,
     pxW,
     pxH,
     pxPerUnit,
     regionCount: regions.length,
   };
 }
-
 /* ------------------------------------------------------------------ *
  * 5. 判定
  * ------------------------------------------------------------------ */
@@ -555,8 +821,9 @@ function render() {
 
   if (!res.ok) {
     $('#warn').hidden = false;
-    $('#warn').innerHTML = '<strong>没量到内部结构</strong>：这张图几乎是纯色块，量不出"最细的笔触"。'
-      + '尺寸可以随手定，或把要保留的细节（眼睛、小字、细线）单独发我看看。';
+    $('#warn').innerHTML = '<strong>没量到可印的细结构</strong>：这张图不是纯色大色块，'
+      + '就是全靠渐变/柔和过渡堆出来的（渐变里没有"一条线"，只有一档档的色阶）。'
+      + '这种情况下尺寸按用途定就行——看它挂多远，或者和别的件对齐。';
     $('#stats').innerHTML = '';
     $('#table tbody').innerHTML = '';
     $('#tiers').innerHTML = '';
@@ -567,6 +834,7 @@ function render() {
 
   /* ---- 警告 ---- */
   const warns = [];
+  if (res.gridLimited) warns.push('这张图最细的结构已到测量下限（约 1/1000 画板长边）：下面的尺寸是<b>下限</b>，真打出来只会更糊，不会更清楚。');
   if (meta.hasImage) warns.push('文件里嵌了位图（&lt;image&gt;），真实细节上限由那张位图决定，SVG 外壳救不了它。');
   if (meta.hasFilter) warns.push('含 &lt;filter&gt;（阴影/模糊等）：大画幅分块时可能退回栅格分片，细节会受影响。');
   if (meta.hasMaskClip) warns.push('含 mask/clipPath：部分切片或分块流程可能不支持，建议先在软件里预览。');
@@ -582,7 +850,11 @@ function render() {
   /* ---- 关键指标 ---- */
   const stats = [
     ['画板比例', ratioLabel(meta.artW, meta.artH), `${fmt(meta.artW)} × ${fmt(meta.artH)} 单位`],
-    ['最细结构', `${fmt(res.finest, 2)}<small> 单位</small>`, `占长边 ${(res.fracFinest * 100).toFixed(2)}%`],
+    [
+      '最细结构',
+      `${res.gridLimited ? '≈ ' : ''}${fmt(res.finest, 2)}<small> 单位</small>`,
+      `${res.gridLimited ? '已到测量下限，' : ''}占长边 ${(res.fracFinest * 100).toFixed(2)}%`,
+    ],
     ['典型线条', `${fmt(res.typical, 1)}<small> 单位</small>`, '面积加权中位'],
     ['色块数', `${res.regionCount}`, '面积 ≥0.04% 的独立色'],
   ];
@@ -797,11 +1069,11 @@ function bind() {
 
   $('#pct').addEventListener('change', async (e) => {
     state.pct = parseInt(e.target.value, 10);
-    $('#pctTag').textContent = `第 ${state.pct} 百分位`;
+    $('#pctTag').textContent = pctLabel(state.pct);
     if (state.text) await loadSvg(state.text, state.name);
   });
   $('#pct').addEventListener('input', (e) => {
-    $('#pctTag').textContent = `第 ${e.target.value} 百分位`;
+    $('#pctTag').textContent = pctLabel(parseInt(e.target.value, 10));
   });
 
   $('#bed').addEventListener('input', (e) => {
@@ -835,6 +1107,14 @@ function bind() {
       alert(txt);
     }
   });
+}
+
+/* 测量口径：滑块实际控制「多细的宽度才算笔画」，15 是默认 */
+function pctLabel(v) {
+  if (v <= 8) return `连尖角一起算（${v}）`;
+  if (v <= 20) return '只算成片的笔画';
+  if (v <= 30) return '更严：只算明显的粗笔画';
+  return `只算最粗的主体（${v}）`;
 }
 
 /* 参数联动：初始线宽标签 */
