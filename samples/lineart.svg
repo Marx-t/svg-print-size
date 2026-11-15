@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="900" viewBox="0 0 1200 900">
+  <rect width="1200" height="900" fill="#fbfaf7"/>
+  <!-- 线稿：笔画 3~6 单位，细处决定尺寸 -->
+  <g fill="none" stroke="#1f2328" stroke-linecap="round" stroke-linejoin="round">
+    <!-- 猫 -->
+    <path d="M420 640 c-40 -10 -70 -50 -70 -100 c0 -80 60 -150 150 -150 c90 0 150 70 150 150 c0 50 -30 90 -70 100"
+          stroke-width="6"/>
+    <path d="M400 400 l-20 -90 l70 40" stroke-width="6"/>
+    <path d="M640 400 l20 -90 l-70 40" stroke-width="6"/>
+    <circle cx="500" cy="470" r="9" fill="#1f2328" stroke="none"/>
+    <circle cx="580" cy="470" r="9" fill="#1f2328" stroke="none"/>
+    <path d="M540 510 l-18 14 l18 14 l18 -14 z" fill="#1f2328" stroke="none"/>
+    <path d="M540 538 v18" stroke-width="3"/>
+    <path d="M540 556 c-8 14 -22 18 -34 12" stroke-width="3"/>
+    <path d="M540 556 c8 14 22 18 34 12" stroke-width="3"/>
+    <path d="M470 520 h-70 M470 540 h-64" stroke-width="3"/>
+    <path d="M610 520 h70 M610 540 h64" stroke-width="3"/>
+    <!-- 地面与草 -->
+    <path d="M120 700 H1080" stroke-width="4"/>
+    <path d="M200 700 c10 -30 26 -46 40 -52" stroke-width="3"/>
+    <path d="M240 700 c0 -36 12 -58 26 -70" stroke-width="3"/>
+    <path d="M280 700 c-8 -28 -22 -44 -36 -50" stroke-width="3"/>
+    <path d="M900 700 c10 -30 26 -46 40 -52" stroke-width="3"/>
+    <path d="M940 700 c0 -36 12 -58 26 -70" stroke-width="3"/>
+    <!-- 极细的 2 单位线 -->
+    <path d="M120 760 H1080" stroke-width="2"/>
+    <path d="M120 800 H1080" stroke-width="2"/>
+  </g>
+</svg>
