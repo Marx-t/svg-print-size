@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="1000" viewBox="0 0 1000 1000">
+  <rect width="1000" height="1000" fill="#ffffff"/>
+  <!-- 粗块图形：色块都很粗，60mm 也够 -->
+  <circle cx="500" cy="380" r="260" fill="#1f6feb"/>
+  <path d="M240 380 h520 v90 h-520 z" fill="#ffffff"/>
+  <rect x="380" y="640" width="240" height="240" rx="24" fill="#111827"/>
+  <path d="M500 640 v240" stroke="#ffffff" stroke-width="40"/>
+  <path d="M380 760 h240" stroke="#ffffff" stroke-width="40"/>
+</svg>
