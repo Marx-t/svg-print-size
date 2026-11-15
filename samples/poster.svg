@@ -1,0 +1,46 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1500" height="1000" viewBox="0 0 1500 1000">
+  <rect width="1500" height="1000" fill="#f3ede2"/>
+
+  <!-- 月亮 -->
+  <circle cx="1130" cy="270" r="130" fill="#e8b45a"/>
+  <circle cx="1086" cy="238" r="22" fill="#dfa949"/>
+  <circle cx="1178" cy="316" r="14" fill="#dfa949"/>
+
+  <!-- 远山 -->
+  <path d="M0 640 L240 470 L430 610 L620 430 L820 620 L1010 470 L1230 630 L1500 500 L1500 1000 L0 1000 Z" fill="#5d7d84"/>
+  <!-- 近山 -->
+  <path d="M0 760 L300 600 L520 740 L760 570 L980 750 L1240 620 L1500 720 L1500 1000 L0 1000 Z" fill="#33545c"/>
+
+  <!-- 水面细线：故意做成 3 单位的细线 -->
+  <g stroke="#8fb3b8" stroke-width="3" fill="none">
+    <path d="M120 812 H520"/>
+    <path d="M700 826 H1180"/>
+    <path d="M200 848 H420"/>
+    <path d="M760 862 H1040"/>
+    <path d="M300 886 H980"/>
+  </g>
+
+  <!-- 极细装饰线：2 单位 -->
+  <g stroke="#c8b7a2" stroke-width="2" fill="none">
+    <path d="M80 120 H420"/>
+    <path d="M80 132 H300"/>
+    <path d="M1080 700 H1420"/>
+  </g>
+
+  <!-- 星 -->
+  <g fill="#fff8e8">
+    <circle cx="180" cy="220" r="5"/>
+    <circle cx="330" cy="150" r="4"/>
+    <circle cx="590" cy="205" r="6"/>
+    <circle cx="880" cy="150" r="4"/>
+    <circle cx="1360" cy="180" r="5"/>
+    <circle cx="1470" cy="330" r="4"/>
+  </g>
+
+  <!-- 文字 -->
+  <g fill="#22333a">
+    <text x="80" y="300" font-family="Georgia, serif" font-size="76" letter-spacing="4">NIGHT</text>
+    <text x="80" y="378" font-family="Georgia, serif" font-size="76" letter-spacing="4">STILLNESS</text>
+    <text x="84" y="432" font-family="Helvetica, Arial, sans-serif" font-size="20" letter-spacing="8" fill="#6a7d84">LAKESIDE STUDY</text>
+  </g>
+</svg>
