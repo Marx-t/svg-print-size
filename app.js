@@ -994,6 +994,14 @@ async function loadSvg(text, name) {
   state.text = text;
   state.name = name;
   $('#dropTitle').textContent = name;
+  // 分析要几秒（大图更久），这段空档必须清掉上一张图的结果 ——
+  // 否则屏幕上留着旧数字，很容易被当成新图算出来的。
+  state.result = null;
+  state.summary = null;
+  $('#out').hidden = true;
+  $('#empty').hidden = false;
+  $('#empty').innerHTML = '<p><strong>正在测量…</strong></p>'
+    + '<p class="muted">栅格化 + 逐色块距离变换，复杂图要几秒</p>';
   try {
     state.result = await analyse(text, { pctValue: state.pct });
     render();
